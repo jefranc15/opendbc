@@ -10,6 +10,7 @@
 #include "opendbc/safety/modes/defaults.h"
 #include "opendbc/safety/modes/honda.h"
 #include "opendbc/safety/modes/toyota.h"
+#include "opendbc/safety/modes/dnga.h"
 #include "opendbc/safety/modes/tesla.h"
 #include "opendbc/safety/modes/gm.h"
 #include "opendbc/safety/modes/ford.h"
@@ -403,6 +404,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
     {SAFETY_SILENT, &nooutput_hooks},
     {SAFETY_HONDA_NIDEC, &honda_nidec_hooks},
     {SAFETY_TOYOTA, &toyota_hooks},
+    {SAFETY_DNGA, &dnga_hooks},
     {SAFETY_ELM327, &elm327_hooks},
     {SAFETY_GM, &gm_hooks},
     {SAFETY_HONDA_BOSCH, &honda_bosch_hooks},
