@@ -1,3 +1,4 @@
+from collections import defaultdict
 from enum import IntFlag
 
 from opendbc.car import Bus, CarSpecs, PlatformConfig, Platforms
@@ -14,6 +15,10 @@ class DngaFlags(IntFlag):
 
 class CarControllerParams:
   STEER_MAX = 255
+  STEER_STEP = 2
+  ACC_CONTROL_STEP = 5
+  ACCEL_MIN = -3.5
+  ACCEL_MAX = 1.6
 
   def __init__(self, CP):
     pass
@@ -46,3 +51,11 @@ class CAR(Platforms):
 
 
 DBC = CAR.create_dbc_map()
+ACC_CAR = {CAR.TOYOTA_YARIS_CROSS_HEV}
+SNG_CAR = CAR.with_flags(DngaFlags.SNG)
+HYBRID_CAR = CAR.with_flags(DngaFlags.HYBRID)
+NOT_CAN_CONTROLLED = set()
+
+# Retained from the DragonPilot port for the later V3.3R4 controller adaptation.
+BRAKE_SCALE = defaultdict(lambda: 1.0, {CAR.TOYOTA_YARIS_CROSS_HEV: 2.0})
+GAS_SCALE = defaultdict(lambda: 2600.0, {CAR.TOYOTA_YARIS_CROSS_HEV: 0.4})
