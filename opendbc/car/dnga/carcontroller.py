@@ -653,6 +653,7 @@ class CarController(CarControllerBase):
     del CC_SP, now_nanos
     enabled = CC.enabled
     active = CC.latActive
+    long_active = CC.longActive
     frame = self.frame
     actuators = CC.actuators
     pcm_cancel_cmd = CC.cruiseControl.cancel
@@ -1045,6 +1046,7 @@ class CarController(CarControllerBase):
 
       base_control_allowed = (
         enabled and
+        long_active and
         CS.out.cruiseState.enabled and
         not pcm_cancel_cmd and
         not CS.out.gasPressed and
