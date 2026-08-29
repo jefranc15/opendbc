@@ -1,0 +1,36 @@
+name: Apply DNGA V4.0 Sunnypilot port
+
+on:
+  push:
+    branches:
+      - dnga-staging-tici
+    paths:
+      - dnga_apply_v4_sunnypilot.py
+      - .github/workflows/dnga-v4-sunnypilot-port.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dnga-staging-tici
+          fetch-depth: 0
+      - name: Apply V4.0 adaptation
+        run: python3 dnga_apply_v4_sunnypilot.py
+      - name: Validate
+        run: |
+          python3 -m py_compile opendbc/car/dnga/carcontroller.py opendbc/car/dnga/carstate.py
+          git diff --check
+      - name: Commit port
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add opendbc/car/dnga/carcontroller.py opendbc/car/dnga/carstate.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'DNGA V4.0: port latest controller and CarState to Sunnypilot'
+          git push origin HEAD:dnga-staging-tici
