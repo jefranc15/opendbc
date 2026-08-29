@@ -14,7 +14,15 @@ from cereal import messaging
 from opendbc.car.interfaces import CarControllerBase
 
 
-# V3.3R4 hybrid-feedback-supervisor build: offline/replay/bench validation.
+# V4.0 DNGA engagement and hybrid-feedback build.
+#
+# V4.0 combines the R4.1 stock-derived handoff with the 2026-08-29 road-log
+# fixes: SET/RES remains an enabled ACC session during driver gas override,
+# longitudinal fault rearm requires fresh/consistent brake-clear feedback but
+# leaves torque neutrality to the independent propulsion gate, the 0.55-second
+# positive-torque/friction allowance starts at actual physical overlap rather
+# than planner decel intent, and a longitudinal-only hybrid fault no longer
+# tears down otherwise healthy lateral steering.
 #
 # R4 retains every R3 stopping and R2 handoff safeguard, but changes the final
 # brake-to-propulsion handoff from timer/aEgo inference to read-only bus-1
@@ -610,6 +618,12 @@ class CarController(CarControllerBase):
     self.v33r4_decel_entry_frame = -1000000
     self.v33r4_decel_entry_torque = 0
     self.v33r4_decel_torque_cleared = False
+    # V4.0 keeps physical friction/positive-torque overlap timing independent
+    # from the decel-latch entry timestamp. Sharing these states caused the
+    # pre-friction planner interval to leak back into the overlap age.
+    self.v33r4_overlap_entry_frame = -1000000
+    self.v33r4_overlap_entry_torque = 0
+    self.v33r4_overlap_torque_cleared = False
     self.v33r4_positive_overlap_counter = 0
 
     self.v25r_plan_source = ""
@@ -642,10 +656,15 @@ class CarController(CarControllerBase):
     self.v33r4_fault_reason = str(reason)
     self.v33r4_brake_clear_counter = 0
     self.v33r4_torque_ready_counter = 0
+    self.v33r4_overlap_entry_frame = -1000000
+    self.v33r4_overlap_entry_torque = 0
+    self.v33r4_overlap_torque_cleared = False
     self.v33r4_positive_overlap_counter = 0
     self.v25l_speed_offset = 0.0
-    if hasattr(CS, "is_cruise_latch"):
-      CS.is_cruise_latch = False
+    # V4.0: hybrid feedback supervises longitudinal actuation only. Keep the
+    # cruise latch and lateral session alive; longitudinal_session_allowed
+    # below still goes false while this fault is latched, so 0x271/0x273 fail
+    # non-propulsive without dropping a healthy 0x1D0 STEER_REQ.
     CS.hybrid_feedback_fault = True
     CS.hybrid_feedback_fault_reason = self.v33r4_fault_reason
 
@@ -747,6 +766,9 @@ class CarController(CarControllerBase):
       self.v33r4_decel_entry_frame = -1000000
       self.v33r4_decel_entry_torque = 0
       self.v33r4_decel_torque_cleared = False
+      self.v33r4_overlap_entry_frame = -1000000
+      self.v33r4_overlap_entry_torque = 0
+      self.v33r4_overlap_torque_cleared = False
       self.v33r4_positive_overlap_counter = 0
 
     self.prev_enabled = enabled  # Save enabled state for the next control cycle
@@ -1044,29 +1066,44 @@ class CarController(CarControllerBase):
       # -----------------------------
       brake_request = apply_brake
 
-      base_control_allowed = (
+      # V4.0 separates the ACC session from actuator authority. Stock accepts
+      # SET/RES and shows the set speed while the driver is overriding with the
+      # accelerator; only brake/CANCEL/session loss disable the 0x271/0x273
+      # session. The Sunnypilot longActive gate is retained. Gas still blocks
+      # every OP brake/propulsion actuator below.
+      base_session_allowed = (
         enabled and
         long_active and
         CS.out.cruiseState.enabled and
         not pcm_cancel_cmd and
-        not CS.out.gasPressed and
         not CS.out.brakePressed
+      )
+      base_control_allowed = (
+        base_session_allowed and
+        not CS.out.gasPressed
       )
       r4_feedback = hybrid_feedback_snapshot(CS, frame)
       r4_feedback_clean = (
         r4_feedback["fresh"] and r4_feedback["consistent"]
       )
+      # Rearm is a session-level decision, not permission for propulsion. A
+      # clean, brake-clear hybrid state may rearm even while torque is not yet
+      # neutral; r4_torque_ready_candidate remains the independent propulsion
+      # gate after the accelerator is released.
       r4_rearm_ok = (
         r4_feedback_clean and
-        r4_feedback["brakes_clear"] and
-        r4_feedback["torque_ramp_ready"] and
-        not r4_feedback["positive_vote"]
+        r4_feedback["brakes_clear"]
       )
 
-      # A fault is not cleared by timers or by the stale outer enabled flag.
-      # A new SET/RES engagement edge may clear it only while all observed
-      # feedback is fresh, mutually consistent, brake-clear, and non-positive.
-      if engagement_edge and self.v33r4_fault_latched:
+      # V4.0: because a longitudinal fault no longer destroys the cruise
+      # latch/lateral session, outer `enabled` may stay true. Accept either the
+      # normal outer engagement edge or a real physical SET/RES release edge
+      # from CarState as the explicit driver request to rearm longitudinal.
+      v40_rearm_edge = (
+        engagement_edge or
+        bool(getattr(CS, "v40_acc_rearm_edge", False))
+      )
+      if v40_rearm_edge and self.v33r4_fault_latched:
         if r4_rearm_ok:
           self.v33r4_fault_latched = False
           self.v33r4_fault_reason = ""
@@ -1090,6 +1127,12 @@ class CarController(CarControllerBase):
 
       control_allowed = (
         base_control_allowed and not self.v33r4_fault_latched
+      )
+      longitudinal_session_allowed = (
+        base_session_allowed and not self.v33r4_fault_latched
+      )
+      gas_override_active = (
+        longitudinal_session_allowed and CS.out.gasPressed
       )
       CS.hybrid_feedback_fault = self.v33r4_fault_latched
       CS.hybrid_feedback_fault_reason = self.v33r4_fault_reason
@@ -1215,9 +1258,10 @@ class CarController(CarControllerBase):
       )
 
       def start_v33r_staged_release():
-        # Copy the stock-observed moving release sequence. Keep the pump
-        # reaction at FC/04/C8 and retain deceleration mode for the full
-        # observed 1.2-second pressure-release interval.
+        # Copy the stock-observed moving release sequence. Keep FC/04/C8 for
+        # the full observed 1.2-second protocol interval. R4.1 no longer treats
+        # that timer alone as physical braking: 0x273 may arm normal mode and,
+        # after verified neutral torque, ramp propulsion while FC/04/C8 remains.
         self.v33r2_decel_latched = True
         self.v33r2_decel_clear_counter = 0
         self.v33r2_release_pump_until_frame = max(
@@ -1839,11 +1883,14 @@ class CarController(CarControllerBase):
         )
       )
 
-      # Toyota briefly overlaps positive hybrid torque with brake entry. In
-      # the passive stock capture the longest voted positive-torque + friction
-      # overlap was 0.20 s. Permit a wider 0.55 s entry envelope only while
-      # torque does not rise materially; once torque has cleared, any return of
-      # voted propulsion under friction is a fault.
+      # Toyota briefly overlaps positive hybrid torque with physical friction
+      # brake entry. The 2026-08-29 R4.1 logs showed the old timer started
+      # 0.5-0.7 s too early from planner/DECEL intent, exhausting the entire
+      # allowance before friction even appeared and falsely dropping control.
+      # V4.0 starts the 0.55 s envelope only when the actual measured overlap
+      # (friction > 0 + positive torque vote) begins. Rising torque, persistence
+      # past the envelope, or positive torque returning after neutral remains a
+      # fault.
       r4_negative_intent = (
         control_allowed and
         (
@@ -1853,32 +1900,51 @@ class CarController(CarControllerBase):
           (plan_fresh and planner_brake_request >= V33R2_DECEL_LATCH_BRAKE)
         )
       )
-      if r4_negative_intent and self.v33r4_decel_entry_frame < 0:
-        self.v33r4_decel_entry_frame = frame
-        self.v33r4_decel_entry_torque = r4_feedback["torque_actual"]
-        self.v33r4_decel_torque_cleared = (
-          r4_feedback["torque_actual"] <= 80
-        )
-      if r4_negative_intent and r4_feedback["torque_actual"] <= 80:
-        self.v33r4_decel_torque_cleared = True
-
       r4_positive_under_friction = (
         control_allowed and
         r4_feedback_clean and
         r4_feedback["friction"] > 0 and
         r4_feedback["positive_vote"]
       )
-      r4_overlap_age = frame - self.v33r4_decel_entry_frame
+
+      if not r4_negative_intent:
+        self.v33r4_overlap_entry_frame = -1000000
+        self.v33r4_overlap_entry_torque = 0
+        self.v33r4_overlap_torque_cleared = False
+      elif r4_feedback_clean and r4_feedback["torque_actual"] <= 80:
+        # Once the powertrain has crossed through the positive-torque region,
+        # any later return to voted propulsion under friction is not an entry
+        # transient and should fault immediately. Keep this independent from
+        # decel-latch clearing so a release-stage transition cannot reset it.
+        self.v33r4_overlap_torque_cleared = True
+
+      if (
+        r4_positive_under_friction and
+        self.v33r4_overlap_entry_frame < 0
+      ):
+        self.v33r4_overlap_entry_frame = frame
+        self.v33r4_overlap_entry_torque = r4_feedback["torque_actual"]
+
+      r4_overlap_started = self.v33r4_overlap_entry_frame >= 0
+      r4_overlap_age = (
+        frame - self.v33r4_overlap_entry_frame
+        if r4_overlap_started else 0
+      )
       r4_overlap_rising = (
+        r4_positive_under_friction and
+        r4_overlap_started and
         r4_feedback["torque_actual"] >
-        max(80, self.v33r4_decel_entry_torque + V33R4_ENTRY_TORQUE_RISE_RAW)
+        max(80, self.v33r4_overlap_entry_torque + V33R4_ENTRY_TORQUE_RISE_RAW)
       )
       r4_overlap_unsafe = (
         r4_positive_under_friction and
         (
           not r4_negative_intent or
-          self.v33r4_decel_torque_cleared or
-          r4_overlap_age > V33R4_ENTRY_OVERLAP_FRAMES or
+          self.v33r4_overlap_torque_cleared or
+          (
+            r4_overlap_started and
+            r4_overlap_age > V33R4_ENTRY_OVERLAP_FRAMES
+          ) or
           r4_overlap_rising
         )
       )
@@ -1982,12 +2048,15 @@ class CarController(CarControllerBase):
         distant_nonclosing_lead
       )
 
+      # R4.1: the stock 1.2 s FC/04/C8 stage is protocol framing, not proof
+      # that physical braking is still active. start_v33r_staged_release()
+      # already owns the persistent latch, so the timed release-pump stage must
+      # not continuously re-request/reset that latch.
       decel_latch_request = (
         control_allowed and
         (
           hydraulic_req or
           sng_release_active or
-          release_pump_active or
           (
             plan_fresh and
             planner_brake_request >= V33R2_DECEL_LATCH_BRAKE
@@ -2002,6 +2071,9 @@ class CarController(CarControllerBase):
         self.v33r4_torque_ready_counter = 0
         self.v33r4_decel_entry_frame = -1000000
         self.v33r4_decel_torque_cleared = False
+        self.v33r4_overlap_entry_frame = -1000000
+        self.v33r4_overlap_entry_torque = 0
+        self.v33r4_overlap_torque_cleared = False
         self.v33r4_positive_overlap_counter = 0
         self.v33r2_release_pump_until_frame = frame
         self.v33r3_predictive_entry_counter = 0
@@ -2027,7 +2099,6 @@ class CarController(CarControllerBase):
           not self.v25o_stop_hold and
           not hydraulic_req and
           not sng_release_active and
-          not release_pump_active and
           r4_feedback_clean and
           r4_feedback["brakes_clear"] and
           (
@@ -2057,7 +2128,6 @@ class CarController(CarControllerBase):
 
       target_slope_lock = (
         hydraulic_req or
-        release_pump_active or
         self.v33r2_decel_latched or
         release_freeze_active or
         self.v25l_speed_offset < -V25V_REGEN_OFFSET_EPS
@@ -2081,7 +2151,6 @@ class CarController(CarControllerBase):
         r4_accel_arm_ready and
         r4_feedback["torque_ramp_ready"] and
         not hydraulic_req and
-        not release_pump_active and
         not self.v33r2_decel_latched and
         positive_agreement
       )
@@ -2096,9 +2165,11 @@ class CarController(CarControllerBase):
         self.v33r4_torque_ready_counter >= V33R4_TORQUE_READY_FRAMES
       )
 
+      # The 1.2 s FC/04/C8 release frame may coexist with positive hybrid
+      # torque in stock. Physical feedback/latch/torque readiness, not the
+      # protocol timer itself, decides whether propulsion may ramp.
       propulsion_blocked = (
         hydraulic_req or
-        release_pump_active or
         self.v33r2_decel_latched or
         not r4_propulsion_ramp_ready or
         not plan_fresh or
@@ -2135,13 +2206,12 @@ class CarController(CarControllerBase):
         # 0x273. Do not retain a negative target on an ordinary open road.
         self.v25l_speed_offset = 0.0
 
-      # Preserve the existing post-deceleration dwell, now driven by the
-      # persistent latch and verified pump-release stage instead of a negative
-      # 0x273 target. Low speed retains an additional neutral wake delay.
+      # R4.1: only physical/latched deceleration extends the neutral dwell.
+      # The stock 1.2 s FC/04/C8 protocol stage can continue after the hybrid
+      # system has already crossed through neutral into positive torque.
       regen_or_brake_active = (
         hydraulic_req or
         sng_release_active or
-        release_pump_active or
         self.v33r2_decel_latched
       )
       if regen_or_brake_active:
@@ -2182,7 +2252,6 @@ class CarController(CarControllerBase):
         control_allowed and
         not hydraulic_req and
         not sng_release_active and
-        not release_pump_active and
         not self.v33r2_decel_latched and
         not self.v25o_stop_hold and
         CS.out.vEgo < V32R_LOW_SPEED_MAX and
@@ -2296,7 +2365,6 @@ class CarController(CarControllerBase):
       elif (
         hydraulic_req or
         sng_release_active or
-        release_pump_active or
         self.v33r2_decel_latched
       ):
         self.v25l_speed_offset = 0.0
@@ -2423,24 +2491,31 @@ class CarController(CarControllerBase):
         # ECU wake stage: lead bit only, no positive desired-speed target.
         self.v25l_speed_offset = 0.0
 
-      # Longitudinal engagement follows independent physical/cruise override
-      # state, not the stale outer `enabled` bit. This makes gas, brake,
-      # CANCEL, and cruise-latch loss encode an exact disabled command.
-      longitudinal_enabled = control_allowed and self.CP.openpilotLongitudinalControl
+      # Keep the SET/RES ACC session visible through a driver accelerator
+      # override, matching the stock camera. Actuator authority remains
+      # `control_allowed`, so gas cannot produce OP braking or propulsion.
+      longitudinal_enabled = longitudinal_session_allowed and self.CP.openpilotLongitudinalControl
       if not longitudinal_enabled:
         brake_state = 0x00
         pump_reaction = 0.0
         brake_mag = 200
         des_speed = 0.0
+      elif gas_override_active:
+        # Stock-like neutral override framing: preserve enabled 0x01/0x273 and
+        # the cluster set speed, but request no OP acceleration/deceleration.
+        brake_state = 0x01
+        pump_reaction = 0.0
+        brake_mag = 200
+        des_speed = CS.out.vEgo
       elif self.v25o_stop_hold or sng_release_active:
         # Stock standstill and standstill-release logs keep ACC_CMD at zero.
         des_speed = 0.0
       elif (
         hydraulic_req or
-        release_pump_active or
         self.v33r2_decel_latched
       ):
-        # Never combine braking intent with a lowered or positive 0x273 target.
+        # Never combine physical/latched braking intent with a positive target.
+        # A timed FC/04/C8 release frame alone is not physical braking.
         des_speed = CS.out.vEgo
       else:
         des_speed = max(0.0, CS.out.vEgo + self.v25l_speed_offset)
@@ -2461,13 +2536,31 @@ class CarController(CarControllerBase):
       if not longitudinal_enabled:
         acc_cmd_is_accel = False
         acc_cmd_is_decel = False
+      elif gas_override_active:
+        # Stock accepts SET while the driver holds the accelerator. Keep the
+        # normal/ACCEL mode bit armed with an exact current-speed target; OP
+        # positive-target authority remains blocked until gas is released and
+        # the R4 torque-ready gate passes.
+        acc_cmd_is_accel = True
+        acc_cmd_is_decel = False
       elif brake_state == 0x30:
         acc_cmd_is_accel = True
         acc_cmd_is_decel = True
       elif (
+        release_pump_active and
+        not self.v33r2_decel_latched and
+        r4_accel_arm_ready and
+        plan_fresh
+      ):
+        # Stock 2026-08-26 capture: 0x271 stayed 0x01 + FC/04/C8 for 1.20 s,
+        # while 0x273 changed 0x20 -> 0x40 and hybrid torque crossed positive.
+        # Arm normal/ACCEL mode here, but target buildup remains independently
+        # blocked by torque-ready feedback and the retained dwell/ramp gates.
+        acc_cmd_is_accel = True
+        acc_cmd_is_decel = False
+      elif (
         brake_state in (0x21, 0x31) or
         sng_release_active or
-        release_pump_active or
         self.v33r2_decel_latched or
         low_speed_handoff_blocked or
         not r4_accel_arm_ready or
@@ -2486,7 +2579,6 @@ class CarController(CarControllerBase):
         low_speed_propulsion_request and
         not hydraulic_req and
         not sng_release_active and
-        not release_pump_active and
         not self.v33r2_decel_latched and
         r4_propulsion_ramp_ready and
         not self.v25o_stop_hold and
@@ -2514,7 +2606,7 @@ class CarController(CarControllerBase):
           self.packer,  # CAN packer
           CS.cruise_speed,  # OP cruise set speed
           CS.out.cruiseState.available,  # ACC ready/available bit
-          longitudinal_enabled,  # Independently override-gated longitudinal state
+          longitudinal_enabled,  # SET/RES session state; gas override stays enabled
           lead_for_acc_cmd,  # Real lead or isolated low-speed ECU wake
           des_speed,  # Desired speed command
           acc_cmd_is_accel,  # Explicit stock IS_ACCEL mode bit

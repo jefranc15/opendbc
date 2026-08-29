@@ -84,6 +84,9 @@ class CarState(CarStateBase):
     self.cruise_speed = CRUISE_MIN_KPH * CV.KPH_TO_MS
     self.is_plus_btn_latch = False
     self.is_minus_btn_latch = False
+    # V4.0 one-cycle SET/RES release edge consumed by CarController when a
+    # longitudinal-only hybrid feedback fault needs explicit driver rearm.
+    self.v40_acc_rearm_edge = False
     self.plus_hold_time = 0.0
     self.minus_hold_time = 0.0
     self.plus_did_hold_step = False
@@ -289,6 +292,13 @@ class CarState(CarStateBase):
 
     minus_button = bool(cp.vl["PCM_BUTTONS"]["SET_MINUS"])
     plus_button = bool(cp.vl["PCM_BUTTONS"]["RES_PLUS"])
+
+    # V4.0: previous latch values are updated later in this block, so this is
+    # true for exactly one CarState cycle on the physical SET or RES release.
+    self.v40_acc_rearm_edge = bool(
+      (self.is_plus_btn_latch and not plus_button) or
+      (self.is_minus_btn_latch and not minus_button)
+    )
 
     if self.is_cruise_latch:
       self._update_cruise_speed_button(plus_button, self.is_plus_btn_latch, True)
