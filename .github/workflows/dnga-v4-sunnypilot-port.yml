@@ -5,7 +5,6 @@ on:
     branches:
       - dnga-staging-tici
     paths:
-      - dnga_apply_v4_sunnypilot.py
       - .github/workflows/dnga-v4-sunnypilot-port.yml
 
 permissions:
@@ -20,35 +19,42 @@ jobs:
         with:
           ref: dnga-staging-tici
           fetch-depth: 0
-      - name: Relax first exact matcher
+      - name: Preserve session only across gas override
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('dnga_apply_v4_sunnypilot.py')
+          p = Path('opendbc/car/dnga/carcontroller.py')
           s = p.read_text()
-          old = "'''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n\\n    self.prev_enabled = enabled\\n'''"
-          new = "'''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n'''"
-          if old not in s:
-            raise SystemExit('workflow prepatch: original engagement matcher not found')
-          s = s.replace(old, new, 1)
-          old2 = "'''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_overlap_entry_frame = -1000000\\n      self.v33r4_overlap_entry_torque = 0\\n      self.v33r4_overlap_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n\\n    self.prev_enabled = enabled\\n'''"
-          new2 = "'''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_overlap_entry_frame = -1000000\\n      self.v33r4_overlap_entry_torque = 0\\n      self.v33r4_overlap_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n'''"
-          if old2 not in s:
-            raise SystemExit('workflow prepatch: replacement engagement matcher not found')
-          s = s.replace(old2, new2, 1)
-          p.write_text(s)
+          old = '''      base_session_allowed = (
+        enabled and
+        long_active and
+        CS.out.cruiseState.enabled and
+        not pcm_cancel_cmd and
+        not CS.out.brakePressed
+      )
+'''
+          new = '''      base_session_allowed = (
+        enabled and
+        (long_active or CS.out.gasPressed) and
+        CS.out.cruiseState.enabled and
+        not pcm_cancel_cmd and
+        not CS.out.brakePressed
+      )
+'''
+          if s.count(old) != 1:
+            raise SystemExit(f'base_session_allowed matcher count={s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
           PY
-      - name: Apply V4.0 adaptation
-        run: python3 dnga_apply_v4_sunnypilot.py
       - name: Validate
         run: |
           python3 -m py_compile opendbc/car/dnga/carcontroller.py opendbc/car/dnga/carstate.py
           git diff --check
-      - name: Commit port
+          grep -Fq '(long_active or CS.out.gasPressed)' opendbc/car/dnga/carcontroller.py
+      - name: Commit fix
         run: |
-          git config user.name 'github-actions[bot]]'
+          git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add opendbc/car/dnga/carcontroller.py opendbc/car/dnga/carstate.py
+          git add opendbc/car/dnga/carcontroller.py
           git diff --cached --quiet && exit 0
-          git commit -m 'DNGA V4.0: port latest controller and CarState to Sunnypilot'
+          git commit -m 'DNGA V4.0: preserve ACC session through gas override'
           git push origin HEAD:dnga-staging-tici
