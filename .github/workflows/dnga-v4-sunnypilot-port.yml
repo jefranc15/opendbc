@@ -25,22 +25,8 @@ jobs:
           from pathlib import Path
           p = Path('opendbc/car/dnga/carcontroller.py')
           s = p.read_text()
-          old = '''      base_session_allowed = (
-        enabled and
-        long_active and
-        CS.out.cruiseState.enabled and
-        not pcm_cancel_cmd and
-        not CS.out.brakePressed
-      )
-'''
-          new = '''      base_session_allowed = (
-        enabled and
-        (long_active or CS.out.gasPressed) and
-        CS.out.cruiseState.enabled and
-        not pcm_cancel_cmd and
-        not CS.out.brakePressed
-      )
-'''
+          old = "      base_session_allowed = (\n        enabled and\n        long_active and\n        CS.out.cruiseState.enabled and\n        not pcm_cancel_cmd and\n        not CS.out.brakePressed\n      )\n"
+          new = "      base_session_allowed = (\n        enabled and\n        (long_active or CS.out.gasPressed) and\n        CS.out.cruiseState.enabled and\n        not pcm_cancel_cmd and\n        not CS.out.brakePressed\n      )\n"
           if s.count(old) != 1:
             raise SystemExit(f'base_session_allowed matcher count={s.count(old)}')
           p.write_text(s.replace(old, new, 1))
