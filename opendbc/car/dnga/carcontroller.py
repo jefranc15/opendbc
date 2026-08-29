@@ -1073,7 +1073,7 @@ class CarController(CarControllerBase):
       # every OP brake/propulsion actuator below.
       base_session_allowed = (
         enabled and
-        long_active and
+        (long_active or CS.out.gasPressed) and
         CS.out.cruiseState.enabled and
         not pcm_cancel_cmd and
         not CS.out.brakePressed
