@@ -26,13 +26,13 @@ jobs:
           from pathlib import Path
           p = Path('dnga_apply_v4_sunnypilot.py')
           s = p.read_text()
-          old = ''''''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n\\n    self.prev_enabled = enabled\\n''''''
-          new = ''''''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n''''''
+          old = "'''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n\\n    self.prev_enabled = enabled\\n'''"
+          new = "'''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n'''"
           if old not in s:
             raise SystemExit('workflow prepatch: original engagement matcher not found')
           s = s.replace(old, new, 1)
-          old2 = ''''''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_overlap_entry_frame = -1000000\\n      self.v33r4_overlap_entry_torque = 0\\n      self.v33r4_overlap_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n\\n    self.prev_enabled = enabled\\n''''''
-          new2 = ''''''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_overlap_entry_frame = -1000000\\n      self.v33r4_overlap_entry_torque = 0\\n      self.v33r4_overlap_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n''''''
+          old2 = "'''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_overlap_entry_frame = -1000000\\n      self.v33r4_overlap_entry_torque = 0\\n      self.v33r4_overlap_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n\\n    self.prev_enabled = enabled\\n'''"
+          new2 = "'''      self.v33r4_decel_entry_frame = -1000000\\n      self.v33r4_decel_entry_torque = 0\\n      self.v33r4_decel_torque_cleared = False\\n      self.v33r4_overlap_entry_frame = -1000000\\n      self.v33r4_overlap_entry_torque = 0\\n      self.v33r4_overlap_torque_cleared = False\\n      self.v33r4_positive_overlap_counter = 0\\n'''"
           if old2 not in s:
             raise SystemExit('workflow prepatch: replacement engagement matcher not found')
           s = s.replace(old2, new2, 1)
@@ -46,7 +46,7 @@ jobs:
           git diff --check
       - name: Commit port
         run: |
-          git config user.name 'github-actions[bot]'
+          git config user.name 'github-actions[bot]]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add opendbc/car/dnga/carcontroller.py opendbc/car/dnga/carstate.py
           git diff --cached --quiet && exit 0
