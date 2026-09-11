@@ -1,20 +1,20 @@
-"""Read-only DNGA hybrid/brake feedback decoding for the Yaris Cross HEV port.
+"""Read-only DNGA hybrid/brake feedback decoding.
 
 The engineering names and units of these fields are not yet Techstream-
-validated. The controller therefore uses only sign, freshness, cross-channel
-agreement, and stock-observed transition envelopes. Nothing in this module
-transmits a CAN message.
+validated. Longitudinal control uses these read-only observations only to
+confirm the physical brake-to-propulsion handoff. Nothing in this module
+transmits a CAN message or owns ACC, HUD, LKA, or cruise-session state.
 """
 
-
-HYBRID_FEEDBACK_MAX_AGE_FRAMES = 25
-HYBRID_TORQUE_POSITIVE_RAW = 80
-HYBRID_TORQUE_POSITIVE_11BIT = 5
-HYBRID_TORQUE_RELEASE_MIN_RAW = -100
+HYBRID_FEEDBACK_MAX_AGE_FRAMES = 25  # 0.25 s at the 100 Hz car loop
+HYBRID_TORQUE_RELEASE_MIN_RAW = -100  # strong negative torque has faded
 HYBRID_TORQUE_RELEASE_MIN_11BIT = -8
-HYBRID_BRAKE_REQUEST_CLEAR_MIN = -100
-HYBRID_FRICTION_CLEAR_MAX = 0
-HYBRID_ACTUAL_12A_MAX_ERROR = 400
+HYBRID_BRAKE_REQUEST_CLEAR_MIN = -100  # 0x275 word 0; active is ~-500..
+HYBRID_FRICTION_CLEAR_MAX = 0  # 0x08C byte 2 stock handoff value
+# The asynchronously sampled passive stock capture reached 354.7 and 92
+# respectively during short driver-brake transitions. These are gross-
+# plausibility limits used only to reject obviously inconsistent feedback.
+HYBRID_ACTUAL_12A_MAX_ERROR = 400  # actual - (73/6)*0x12A
 HYBRID_12A_125_MAX_ERROR = 100
 
 
@@ -68,6 +68,7 @@ def decode_hybrid_feedback_frame(addr, dat):
 
 
 def initialize_hybrid_feedback_state(car_state):
+  """Initialize the dynamic CarState attributes consumed by the longitudinal observer."""
   car_state.hybrid_brake_request_raw_275 = 0
   car_state.hybrid_torque_request_raw_275 = 0
   car_state.hybrid_torque_actual_raw_2c9 = 0
@@ -88,17 +89,17 @@ def apply_hybrid_feedback_frame(car_state, frame, addr, dat):
     return False
   for field, value in decoded.items():
     setattr(car_state, field, value)
-  setattr(car_state, f"hybrid_feedback_rx_frame_{addr:03x}", int(frame))
+  setattr(car_state, "hybrid_feedback_rx_frame_{:03x}".format(addr), int(frame))
   return True
 
 
 def hybrid_feedback_snapshot(car_state, frame):
-  """Return the conservative freshness/agreement classification used by R4."""
+  """Classify feedback freshness, agreement, brake release, and torque readiness."""
   frame = int(frame)
   ages = {}
   fresh = True
   for suffix in ("275", "2c9", "12a", "125", "08c"):
-    rx_frame = int(getattr(car_state, f"hybrid_feedback_rx_frame_{suffix}", -1000000))
+    rx_frame = int(getattr(car_state, "hybrid_feedback_rx_frame_{}".format(suffix), -1000000))
     age = frame - rx_frame
     ages[suffix] = age
     fresh = fresh and 0 <= age <= HYBRID_FEEDBACK_MAX_AGE_FRAMES
@@ -110,21 +111,16 @@ def hybrid_feedback_snapshot(car_state, frame):
   torque_125 = int(getattr(car_state, "hybrid_torque_raw_125", 0))
   friction = int(getattr(car_state, "hybrid_friction_raw_08c", 0))
 
+  # 73/6 (12.1667) is the fit observed between 0x2C9 and 0x12A.
   actual_12a_error = abs((torque_actual * 6 - torque_12a * 73) / 6.0)
   duplicate_error = abs(torque_12a - torque_125)
   consistent = actual_12a_error <= HYBRID_ACTUAL_12A_MAX_ERROR and duplicate_error <= HYBRID_12A_125_MAX_ERROR
-  positive_vote = (
-    torque_request > HYBRID_TORQUE_POSITIVE_RAW and
-    torque_actual > HYBRID_TORQUE_POSITIVE_RAW and
-    torque_12a > HYBRID_TORQUE_POSITIVE_11BIT and
-    torque_125 > HYBRID_TORQUE_POSITIVE_11BIT
-  )
   brakes_clear = brake_request >= HYBRID_BRAKE_REQUEST_CLEAR_MIN and friction <= HYBRID_FRICTION_CLEAR_MAX
   torque_ramp_ready = (
-    torque_request >= HYBRID_TORQUE_RELEASE_MIN_RAW and
-    torque_actual >= HYBRID_TORQUE_RELEASE_MIN_RAW and
-    torque_12a >= HYBRID_TORQUE_RELEASE_MIN_11BIT and
-    torque_125 >= HYBRID_TORQUE_RELEASE_MIN_11BIT
+    torque_request >= HYBRID_TORQUE_RELEASE_MIN_RAW
+    and torque_actual >= HYBRID_TORQUE_RELEASE_MIN_RAW
+    and torque_12a >= HYBRID_TORQUE_RELEASE_MIN_11BIT
+    and torque_125 >= HYBRID_TORQUE_RELEASE_MIN_11BIT
   )
 
   return {
@@ -133,7 +129,6 @@ def hybrid_feedback_snapshot(car_state, frame):
     "consistent": bool(consistent),
     "brakes_clear": bool(brakes_clear),
     "torque_ramp_ready": bool(torque_ramp_ready),
-    "positive_vote": bool(positive_vote),
     "brake_request": brake_request,
     "torque_request": torque_request,
     "torque_actual": torque_actual,
