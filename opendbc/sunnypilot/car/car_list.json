@@ -3895,6 +3895,14 @@
     ],
     "package": "All"
   },
+  "Toyota Yaris Cross DNGA HEV": {
+    "platform": "TOYOTA_YARIS_CROSS_HEV",
+    "make": "Toyota",
+    "brand": "dnga",
+    "model": "Yaris Cross DNGA HEV",
+    "year": [],
+    "package": "Hybrid / AC200 DNGA"
+  },
   "Toyota Yaris (Non-US only) 2020, 2023": {
     "platform": "TOYOTA_YARIS",
     "make": "Toyota",

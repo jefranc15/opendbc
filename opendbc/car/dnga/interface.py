@@ -51,8 +51,8 @@ class CarInterface(CarInterfaceBase):
     ret.longitudinalTuning.kiBP = [0.0]
     ret.longitudinalTuning.kiV = [0.0]
     ret.longitudinalActuatorDelay = 0.45
-    ret.openpilotLongitudinalControl = False
-    ret.dashcamOnly = True
+    ret.openpilotLongitudinalControl = True
+    ret.dashcamOnly = False
 
     # ACC MAIN/SET/RES state is reconstructed in CarState exactly as on the
     # DragonPilot port, so keep pcmCruise tied to that software cruise state.

@@ -135,22 +135,23 @@ class CarState(CarStateBase):
     """Observe raw bus-1 hybrid data and stock-camera bus-2 frames."""
     for _, frames in can_packets:
       for msg in frames:
-        if msg.src == 1 and msg.address == 0x277:
-          dat = bytes(msg.dat)
+        address, dat, src = msg
+        if src == 1 and address == 0x277:
+          dat = bytes(dat)
           if len(dat) >= 3:
             self.gas_raw_277 = int.from_bytes(dat[1:3], "big")
             self.gas_raw_277_seen = True
 
-        elif msg.src == 1 and msg.address == 0x037:
-          dat = bytes(msg.dat)
+        elif src == 1 and address == 0x037:
+          dat = bytes(dat)
           if len(dat) >= 5:
             self.engine_rpm_raw_037 = decode_engine_rpm_037(int.from_bytes(dat[3:5], "big"))
 
-        elif msg.src == 1 and msg.address in (0x08C, 0x125, 0x12A, 0x275, 0x2C9):
-          apply_hybrid_feedback_frame(self, frame, msg.address, msg.dat)
+        elif src == 1 and address in (0x08C, 0x125, 0x12A, 0x275, 0x2C9):
+          apply_hybrid_feedback_frame(self, frame, address, dat)
 
-        elif msg.src == 2 and msg.address == 0x271:
-          decoded = decode_stock_acc_brake_271(msg.dat)
+        elif src == 2 and address == 0x271:
+          decoded = decode_stock_acc_brake_271(dat)
           if decoded is not None:
             state, pump, magnitude, decel = decoded
             self.stock_acc_brake_state = state
@@ -159,8 +160,8 @@ class CarState(CarStateBase):
             self.stock_acc_brake_decel = decel
             self.stock_acc_brake_rx_frame = frame
 
-        elif msg.src == 2 and msg.address == 0x273:
-          decoded = decode_stock_acc_cmd_273(msg.dat)
+        elif src == 2 and address == 0x273:
+          decoded = decode_stock_acc_cmd_273(dat)
           if decoded is not None:
             enabled, lead, is_accel, is_decel, acc_cmd_kph = decoded
             self.stock_acc_request_enabled = enabled
