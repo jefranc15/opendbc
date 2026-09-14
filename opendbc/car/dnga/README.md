@@ -49,7 +49,7 @@ temporarily positive downstream PID. The geometry-only fallback requires a
 trusted closing lead plus matching negative planner intent. V4.1's stronger
 0.24 final-crawl floor is retained for stop completion.
 
-## V4.3 curve and set-speed corrections
+## V4.3/V4.3.1 curve and set-speed corrections
 
 The software DNGA cruise latch uses `CarParams.pcmCruise = True` while
 openpilot longitudinal control remains enabled. This makes the CarState
@@ -69,8 +69,23 @@ selection through `longitudinalPlanSP == sccVision`, so the G8 port maps
 speed-limit contexts separate.
 
 Curve anticipation uses 60% of the most negative acceleration in the first
-13 plan points and caps it at -0.35 m/s². It only uses the normal 0x273
-below-vEgo HEV/coast path; curve-only hydraulic braking remains disabled.
+13 plan points and caps it at -0.35 m/s². DragonPilot V4.3 road logs showed
+that this normal 0x273 below-vEgo path alone produced very little curve
+deceleration, so V4.3.1 restores the historical curve-only 0x21 supplement.
+
+On DragonPilot the curve target is `visionTurnSpeed`. Current sunnypilot
+publishes the equivalent selected source as `longitudinalPlanSP.sccVision`
+and its target as `smartCruiseControl.vision.vTarget`; the G8 port maps only
+that selected vision context into the V4.3.1 curve path. SCC-map and
+speed-limit contexts stay excluded.
+
+Curve hydraulic entry requires no controlling lead, speed above 5.6 m/s,
+at least 0.70 m/s speed error above the vision turn target, at least
+0.12 m/s² of anticipated turn braking, and three consecutive 20 Hz
+confirmations. Authority follows the bounded historical curve envelope
+(about 0.17 m/s² at 8 m/s, 0.23 at 15 m/s, and no more than 0.30 m/s²).
+Curve braking cannot arm stop-and-go and releases when the selected turn
+context clears or the vehicle reaches the turn target.
 
 ## HEV feedback scope
 

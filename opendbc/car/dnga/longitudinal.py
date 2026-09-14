@@ -17,6 +17,7 @@ class PlanState:
   brake: float
   source: str
   curve_active: bool
+  turn_speed: float
 
 
 @dataclass
@@ -114,6 +115,11 @@ def progressive_brake_cap(v_ego):
   return float(interp(v_ego, [8.0, 15.0, 25.0, 35.0], [P.HIGHWAY_BRAKE_CAP_MIN, 0.27, 0.29, P.HIGHWAY_BRAKE_CAP_MAX]))
 
 
+def curve_brake_cap(v_ego):
+  """Historical DNGA curve-only hydraulic envelope, selected only by source=turn."""
+  return float(interp(v_ego, [5.6, 8.0, 15.0, 25.0, 35.0], [0.12, 0.17, 0.23, 0.28, 0.30]))
+
+
 def powertrain_decel_cap(v_ego):
   """Maximum below-vEgo 0x273 offset used for smooth lead deceleration."""
   return float(interp(v_ego, [0.0, 4.0, 15.0, 25.0, 35.0], [0.08, 0.15, 0.28, 0.40, 0.45]))
@@ -179,11 +185,13 @@ class LongitudinalController:
     self.plan_accel = 0.0
     self.plan_accel_next = 0.0
     self.plan_curve_accel = 0.0
+    self.plan_turn_speed = 0.0
     self.plan_has_lead = False
     self.plan_frame = -1000000
     # Current sunnypilot publishes its selected cruise context separately.
     # sccVision is the semantic equivalent of DragonPilot 0.8.13's "turn" source.
     self.plan_sp_source = ""
+    self.plan_sp_turn_speed = 0.0
     self.plan_sp_frame = -1000000
     self.lead0_status = False
     self.lead0_drel = 0.0
@@ -213,6 +221,8 @@ class LongitudinalController:
     self.brake_active = False
     self.brake_entry_counter = 0
     self.urgent_entry_counter = 0
+    self.curve_entry_counter = 0
+    self.curve_brake_active = False
     self.sng_armed = False
     self.stop_hold = False
     self.sng_release_count = 0
@@ -255,6 +265,8 @@ class LongitudinalController:
     self.brake_active = False
     self.brake_entry_counter = 0
     self.urgent_entry_counter = 0
+    self.curve_entry_counter = 0
+    self.curve_brake_active = False
     self.release_counter = 0
     self.urgent_brake = False
     self.handoff_counter = 0
@@ -272,6 +284,7 @@ class LongitudinalController:
           long_plan = self.plan_sm["longitudinalPlan"]
           self.plan_source = normalize_plan_source(getattr(long_plan, "longitudinalPlanSource", ""))
           self.plan_has_lead = bool(getattr(long_plan, "hasLead", False))
+          self.plan_turn_speed = float(getattr(long_plan, "visionTurnSpeed", 0.0))
           plan_accels = getattr(long_plan, "accels", [])
           if len(plan_accels) > 0:
             self.plan_accel = float(plan_accels[0])
@@ -292,6 +305,7 @@ class LongitudinalController:
         if self.plan_sp_sm.updated["longitudinalPlanSP"]:
           long_plan_sp = self.plan_sp_sm["longitudinalPlanSP"]
           self.plan_sp_source = normalize_plan_source(getattr(long_plan_sp, "longitudinalPlanSource", ""))
+          self.plan_sp_turn_speed = float(getattr(long_plan_sp.smartCruiseControl.vision, "vTarget", 0.0))
           self.plan_sp_frame = frame
       except Exception:
         pass
@@ -320,18 +334,21 @@ class LongitudinalController:
     planner_reports_lead = plan_fresh and (self.plan_has_lead or planner_source_lead)
     planner_accel_request = 0.7 * self.plan_accel + 0.3 * self.plan_accel_next if plan_fresh else apply_accel
 
-    # DragonPilot 0.8.13 V4.3 used longitudinalPlanSource == "turn".
-    # Current sunnypilot publishes the selected vision-turn context as
-    # longitudinalPlanSP.sccVision while the base MPC source remains "cruise".
-    # Translate that context to "turn", and keep map/speed-limit contexts
-    # distinct so they cannot accidentally gain the V4.3 no-lead negative path.
+    # DragonPilot 0.8.13 V4.3.1 uses longitudinalPlanSource == "turn" and
+    # visionTurnSpeed. Current sunnypilot publishes the equivalent selected
+    # context as longitudinalPlanSP.sccVision, with its turn target in
+    # smartCruiseControl.vision.vTarget. Keep map/speed-limit contexts distinct
+    # so they cannot gain the curve-only negative or hydraulic paths.
     plan_sp_fresh = frame - self.plan_sp_frame <= P.PLAN_MAX_AGE_FRAMES
     effective_source = self.plan_source if plan_fresh else ""
+    turn_speed = self.plan_turn_speed if plan_fresh else 0.0
     if plan_sp_fresh:
       if self.plan_sp_source == "sccvision":
         effective_source = "turn"
+        turn_speed = self.plan_sp_turn_speed
       elif self.plan_sp_source in ("sccmap", "speedlimitassist"):
         effective_source = self.plan_sp_source
+        turn_speed = 0.0
 
     curve_active = plan_fresh and effective_source == "turn" and (not planner_reports_lead)
     if curve_active:
@@ -349,6 +366,7 @@ class LongitudinalController:
       planner_brake_request,
       effective_source,
       curve_active,
+      turn_speed if curve_active else 0.0,
     )
 
   def _update_lead(self, CS, frame, lead, plan):
@@ -646,48 +664,75 @@ class LongitudinalController:
       and (lead_state.ttc <= P.DECEL_GOVERNOR_CRITICAL_TTC)
     )
     moving_allowed = session.allowed and (not CS.out.standstill)
+    curve_speed_error = (
+      max(0.0, CS.out.vEgo - plan.turn_speed)
+      if plan.curve_active and plan.turn_speed > 0.0
+      else 0.0
+    )
     brake_request = max(0.0, -apply_accel)
     guard = self._update_stop_guard(CS, frame, plan.brake, moving_allowed, lead_state)
     sng_release_active = self._update_stop_hold(CS, frame, session, apply_accel, plan, lead_state)
     soft_releasing_hydraulic = False
     if not sng_release_active and (not self.stop_hold) and self.brake_active:
       safety_hard_release = not moving_allowed
-      handoff_candidate = (
-        CS.out.vEgo >= P.HIGHWAY_MIN_SPEED
-        and plan.fresh
-        and lead_state.relevant
-        and (not urgent_closing)
-        and (not self.urgent_brake)
-        and (not self.sng_armed)
-        and (not stop_completion_active)
-        and (plan.brake < lead_hydraulic_entry)
-        and (apply_accel >= P.HANDOFF_PID_ACCEL)
-        and (CS.out.aEgo <= P.HANDOFF_AEGO_MAX)
-      )
-      if handoff_candidate and (not self.handoff_active):
-        self.handoff_counter = min(self.handoff_counter + 1, P.HANDOFF_COUNT)
-        if self.handoff_counter >= P.HANDOFF_COUNT:
-          self.handoff_active = True
-      elif not self.handoff_active:
-        self.handoff_counter = 0
-      if self.lead_loss_counter >= P.LEAD_LOSS_COUNT:
-        safety_hard_release = True
-      elif plan.fresh and (not plan.has_lead):
+      hold_brake_to_standstill = False
+
+      if self.curve_brake_active:
+        # Curve braking is independent of lead-loss logic and can never arm SNG.
         self.sng_armed = False
-        safety_hard_release = True
-      hold_brake_to_standstill = (
-        self.sng_armed
-        and (stopped_lead_approach or stop_completion_active)
-        and (CS.out.vEgo <= P.SNG_ARM_SPEED)
-        or guard.completion
-      )
-      low_demand = (
-        False
-        if hold_brake_to_standstill or guard.active
-        else plan.brake < P.PLANNER_RELEASE
-        if plan.fresh
-        else brake_request < 0.12
-      )
+        self.handoff_counter = 0
+        self.handoff_active = False
+
+        if CS.out.vEgo <= P.CURVE_HYDRAULIC_MIN_SPEED:
+          safety_hard_release = True
+
+        if lead_state.relevant and plan.brake >= lead_hydraulic_entry:
+          # Seamlessly hand authority back to the normal lead-brake path.
+          self.curve_brake_active = False
+          low_demand = False
+        else:
+          low_demand = (
+            (not plan.curve_active)
+            or plan.brake < P.CURVE_BRAKE_RELEASE
+            or curve_speed_error <= P.CURVE_SPEED_ERROR_RELEASE
+          )
+      else:
+        handoff_candidate = (
+          CS.out.vEgo >= P.HIGHWAY_MIN_SPEED
+          and plan.fresh
+          and lead_state.relevant
+          and (not urgent_closing)
+          and (not self.urgent_brake)
+          and (not self.sng_armed)
+          and (not stop_completion_active)
+          and (plan.brake < lead_hydraulic_entry)
+          and (apply_accel >= P.HANDOFF_PID_ACCEL)
+          and (CS.out.aEgo <= P.HANDOFF_AEGO_MAX)
+        )
+        if handoff_candidate and (not self.handoff_active):
+          self.handoff_counter = min(self.handoff_counter + 1, P.HANDOFF_COUNT)
+          if self.handoff_counter >= P.HANDOFF_COUNT:
+            self.handoff_active = True
+        elif not self.handoff_active:
+          self.handoff_counter = 0
+        if self.lead_loss_counter >= P.LEAD_LOSS_COUNT:
+          safety_hard_release = True
+        elif plan.fresh and (not plan.has_lead):
+          self.sng_armed = False
+          safety_hard_release = True
+        hold_brake_to_standstill = (
+          self.sng_armed
+          and (stopped_lead_approach or stop_completion_active)
+          and (CS.out.vEgo <= P.SNG_ARM_SPEED)
+          or guard.completion
+        )
+        low_demand = (
+          False
+          if hold_brake_to_standstill or guard.active
+          else plan.brake < P.PLANNER_RELEASE
+          if plan.fresh
+          else brake_request < 0.12
+        )
       if safety_hard_release:
         self.sng_armed = False
         if session.allowed:
@@ -724,6 +769,16 @@ class LongitudinalController:
         and (CS.out.vEgo > P.MIN_ENTRY_SPEED)
         and (frame > self.block_brake_until_frame)
       )
+      curve_entry = (
+        moving_allowed
+        and plan.curve_active
+        and (not lead_state.relevant)
+        and (CS.out.vEgo > P.CURVE_HYDRAULIC_MIN_SPEED)
+        and (curve_speed_error >= P.CURVE_SPEED_ERROR_ENTRY)
+        and (plan.brake >= P.CURVE_BRAKE_ENTRY)
+        and (frame > self.block_brake_until_frame)
+        and (frame >= self.brake_reentry_frame)
+      )
       if lead_entry:
         required_entry_count = 1 if guard.entry else P.CREEP_ENTRY_COUNT if creep_stop_guard else P.LEAD_ENTRY_COUNT
         self.brake_entry_counter = min(self.brake_entry_counter + 1, required_entry_count)
@@ -734,10 +789,17 @@ class LongitudinalController:
         self.urgent_entry_counter = min(self.urgent_entry_counter + 1, P.URGENT_ENTRY_COUNT)
       else:
         self.urgent_entry_counter = 0
+      if curve_entry:
+        self.curve_entry_counter = min(self.curve_entry_counter + 1, P.CURVE_ENTRY_COUNT)
+      else:
+        self.curve_entry_counter = 0
+
       urgent_confirmed = urgent_entry and self.urgent_entry_counter >= P.URGENT_ENTRY_COUNT
       normal_confirmed = self.brake_entry_counter >= required_entry_count
+      curve_confirmed = curve_entry and self.curve_entry_counter >= P.CURVE_ENTRY_COUNT
       if urgent_confirmed or normal_confirmed:
         self.brake_active = True
+        self.curve_brake_active = False
         self.urgent_brake = bool(urgent_confirmed)
         entry_brake = P.BRAKE_MIN
         if guard.stock_active:
@@ -755,14 +817,29 @@ class LongitudinalController:
           self.sng_armed = True
           self.apply_brake = max(self.apply_brake, P.CREEP_BRAKE_FLOOR)
           self.brake_target = max(self.brake_target, P.CREEP_BRAKE_FLOOR)
+      elif curve_confirmed:
+        self.brake_active = True
+        self.curve_brake_active = True
+        self.urgent_brake = False
+        self.apply_brake = P.BRAKE_MIN
+        self.brake_target = P.BRAKE_MIN
+        self.curve_entry_counter = 0
+        self.brake_entry_counter = 0
+        self.urgent_entry_counter = 0
+        self.release_counter = 0
+        self.sng_armed = False
+        self.stop_guard_latched = False
+        self.speed_offset = 0.0
     if self.brake_active and (guard.stock_active or guard.predictive_confirmed):
       self.stop_guard_latched = True
     if self.brake_active and (not self.stop_hold):
       if not soft_releasing_hydraulic:
         speed_scale = interp(CS.out.vEgo, [0.0, 140.0 * CV.KPH_TO_MS], [1.0, 1.0 / 1.5])
-        if urgent_closing or plan.brake >= P.URGENT_HARD_DECEL:
+        if (not self.curve_brake_active) and (urgent_closing or plan.brake >= P.URGENT_HARD_DECEL):
           self.urgent_brake = True
-        if guard.active:
+        if self.curve_brake_active:
+          requested_cap = curve_brake_cap(CS.out.vEgo)
+        elif guard.active:
           requested_cap = P.STOP_BRAKE_MAX
         elif self.urgent_brake:
           requested_cap = P.URGENT_BRAKE_MAX
@@ -770,7 +847,11 @@ class LongitudinalController:
           requested_cap = min(lead_normal_cap, progressive_brake_cap(CS.out.vEgo))
         else:
           requested_cap = lead_normal_cap
-        brake_cap = min(requested_cap, low_speed_brake_cap(CS.out.vEgo), high_speed_brake_cap(CS.out.vEgo))
+        brake_cap = (
+          requested_cap
+          if self.curve_brake_active
+          else min(requested_cap, low_speed_brake_cap(CS.out.vEgo), high_speed_brake_cap(CS.out.vEgo))
+        )
         if guard.active:
           # The stop guard has its own measured envelope; do not double-cap it.
           brake_cap = P.STOP_BRAKE_MAX
@@ -782,7 +863,7 @@ class LongitudinalController:
           brake_cap = max(brake_cap, brake_floor)
         if plan.fresh:
           target_request = plan.brake
-          if apply_accel < 0.0:
+          if (not self.curve_brake_active) and apply_accel < 0.0:
             pid_extra = max(0.0, brake_request - plan.brake)
             target_request += min(P.PID_BRAKE_ALLOWANCE, P.PID_BRAKE_BLEND * pid_extra)
         else:
@@ -793,6 +874,7 @@ class LongitudinalController:
         self._apply_brake_target(raw_target_brake, brake_floor, brake_cap, emergency_closing, critical_closing, guard)
       if (
         self.brake_active
+        and (not self.curve_brake_active)
         and lead_state.relevant
         and (CS.out.vEgo <= P.SNG_ARM_SPEED)
         and (

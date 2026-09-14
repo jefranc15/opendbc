@@ -204,11 +204,18 @@ class LongitudinalParams:
   DECEL_OFFSET_STEP_DOWN = 0.02
   DECEL_OFFSET_STEP_UP = 0.08
 
-  # Vision-turn anticipation. The plan trajectory is sampled over a short
-  # horizon and used only for the smooth 0x273 below-vEgo path.
+  # Vision-turn anticipation. Bring a bounded portion of future decel forward
+  # into 0x273, then allow a narrowly scoped curve-only 0x21 supplement when
+  # the selected source is vision turn and the car remains above turn target.
   CURVE_LOOKAHEAD_COUNT = 13
   CURVE_LOOKAHEAD_WEIGHT = 0.60
   CURVE_MAX_DECEL = 0.35
+  CURVE_HYDRAULIC_MIN_SPEED = 5.6
+  CURVE_SPEED_ERROR_ENTRY = 0.70
+  CURVE_SPEED_ERROR_RELEASE = 0.20
+  CURVE_BRAKE_ENTRY = 0.12
+  CURVE_BRAKE_RELEASE = 0.06
+  CURVE_ENTRY_COUNT = 3
 
   # Allow a user-commanded lower cruise setpoint to use the same smooth
   # below-vEgo 0x273 path once the car is meaningfully above that set speed.
