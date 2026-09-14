@@ -197,10 +197,22 @@ class LongitudinalParams:
   EMERGENCY_BRAKE_FILTER_UP = 0.2
   EMERGENCY_BRAKE_STEP_UP = 0.03
 
-  # V3.3-style desired-speed shaping. Negative target is lead-only.
+  # V3.3-style desired-speed shaping. Negative 0x273 targets are allowed
+  # only for a trusted lead, an explicitly selected vision turn, or when the
+  # user has set cruise below current speed.
   DECEL_DEADBAND = 0.02
   DECEL_OFFSET_STEP_DOWN = 0.02
   DECEL_OFFSET_STEP_UP = 0.08
+
+  # Vision-turn anticipation. The plan trajectory is sampled over a short
+  # horizon and used only for the smooth 0x273 below-vEgo path.
+  CURVE_LOOKAHEAD_COUNT = 13
+  CURVE_LOOKAHEAD_WEIGHT = 0.60
+  CURVE_MAX_DECEL = 0.35
+
+  # Allow a user-commanded lower cruise setpoint to use the same smooth
+  # below-vEgo 0x273 path once the car is meaningfully above that set speed.
+  CRUISE_DECEL_MARGIN = 0.30
   ACCEL_ENTRY = 0.05
   ACCEL_CAP = 0.25
   ACCEL_OFFSET_STEP_UP = 0.004

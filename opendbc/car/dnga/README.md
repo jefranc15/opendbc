@@ -49,6 +49,29 @@ temporarily positive downstream PID. The geometry-only fallback requires a
 trusted closing lead plus matching negative planner intent. V4.1's stronger
 0.24 final-crawl floor is retained for stop completion.
 
+## V4.3 curve and set-speed corrections
+
+The software DNGA cruise latch uses `CarParams.pcmCruise = True` while
+openpilot longitudinal control remains enabled. This makes the CarState
+SET/RES speed authoritative for planner cruise speed. The G8 CarState already
+uses held-step tracking, so a 5 km/h long-press step does not add an extra
+1 km/h on release.
+
+No-lead negative 0x273 targets remain opt-in. V4.3 allows them only for:
+
+- a selected vision-turn context; or
+- normal cruise when actual speed is above the user's SET speed.
+
+DragonPilot 0.8.13 exposes the vision-turn context as
+`longitudinalPlanSource == turn`. Current sunnypilot exposes the equivalent
+selection through `longitudinalPlanSP == sccVision`, so the G8 port maps
+`sccVision` to the same V4.3 turn context while keeping SCC-map and
+speed-limit contexts separate.
+
+Curve anticipation uses 60% of the most negative acceleration in the first
+13 plan points and caps it at -0.35 m/s². It only uses the normal 0x273
+below-vEgo HEV/coast path; curve-only hydraulic braking remains disabled.
+
 ## HEV feedback scope
 
 The HEV observer is used only at a deceleration-to-propulsion boundary. A prior

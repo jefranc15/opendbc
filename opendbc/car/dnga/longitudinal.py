@@ -15,6 +15,8 @@ class PlanState:
   has_lead: bool
   accel: float
   brake: float
+  source: str
+  curve_active: bool
 
 
 @dataclass
@@ -176,8 +178,13 @@ class LongitudinalController:
     self.plan_source = ""
     self.plan_accel = 0.0
     self.plan_accel_next = 0.0
+    self.plan_curve_accel = 0.0
     self.plan_has_lead = False
     self.plan_frame = -1000000
+    # Current sunnypilot publishes its selected cruise context separately.
+    # sccVision is the semantic equivalent of DragonPilot 0.8.13's "turn" source.
+    self.plan_sp_source = ""
+    self.plan_sp_frame = -1000000
     self.lead0_status = False
     self.lead0_drel = 0.0
     self.lead0_vrel = 0.0
@@ -189,6 +196,10 @@ class LongitudinalController:
       self.plan_sm = messaging.SubMaster(["longitudinalPlan"])
     except Exception:
       self.plan_sm = None
+    try:
+      self.plan_sp_sm = messaging.SubMaster(["longitudinalPlanSP"])
+    except Exception:
+      self.plan_sp_sm = None
     try:
       self.radar_sm = messaging.SubMaster(["radarState"])
     except Exception:
@@ -265,9 +276,26 @@ class LongitudinalController:
           if len(plan_accels) > 0:
             self.plan_accel = float(plan_accels[0])
             self.plan_accel_next = float(plan_accels[1]) if len(plan_accels) > 1 else self.plan_accel
+
+            curve_count = min(len(plan_accels), P.CURVE_LOOKAHEAD_COUNT)
+            self.plan_curve_accel = min(float(plan_accels[i]) for i in range(curve_count))
           self.plan_frame = frame
       except Exception:
         pass
+
+    # sunnypilot moved non-lead cruise context selection into longitudinalPlanSP.
+    # Keep it separate so failure/unavailability of this optional message never
+    # disables the primary longitudinalPlan subscriber.
+    if self.plan_sp_sm is not None:
+      try:
+        self.plan_sp_sm.update(0)
+        if self.plan_sp_sm.updated["longitudinalPlanSP"]:
+          long_plan_sp = self.plan_sp_sm["longitudinalPlanSP"]
+          self.plan_sp_source = normalize_plan_source(getattr(long_plan_sp, "longitudinalPlanSource", ""))
+          self.plan_sp_frame = frame
+      except Exception:
+        pass
+
     if self.radar_sm is not None:
       try:
         self.radar_sm.update(0)
@@ -291,8 +319,37 @@ class LongitudinalController:
     planner_source_lead = plan_fresh and self.plan_source in ("lead0", "lead1")
     planner_reports_lead = plan_fresh and (self.plan_has_lead or planner_source_lead)
     planner_accel_request = 0.7 * self.plan_accel + 0.3 * self.plan_accel_next if plan_fresh else apply_accel
+
+    # DragonPilot 0.8.13 V4.3 used longitudinalPlanSource == "turn".
+    # Current sunnypilot publishes the selected vision-turn context as
+    # longitudinalPlanSP.sccVision while the base MPC source remains "cruise".
+    # Translate that context to "turn", and keep map/speed-limit contexts
+    # distinct so they cannot accidentally gain the V4.3 no-lead negative path.
+    plan_sp_fresh = frame - self.plan_sp_frame <= P.PLAN_MAX_AGE_FRAMES
+    effective_source = self.plan_source if plan_fresh else ""
+    if plan_sp_fresh:
+      if self.plan_sp_source == "sccvision":
+        effective_source = "turn"
+      elif self.plan_sp_source in ("sccmap", "speedlimitassist"):
+        effective_source = self.plan_sp_source
+
+    curve_active = plan_fresh and effective_source == "turn" and (not planner_reports_lead)
+    if curve_active:
+      anticipated_curve_accel = min(
+        planner_accel_request,
+        self.plan_curve_accel * P.CURVE_LOOKAHEAD_WEIGHT,
+      )
+      planner_accel_request = max(-P.CURVE_MAX_DECEL, anticipated_curve_accel)
+
     planner_brake_request = max(0.0, -planner_accel_request)
-    return PlanState(plan_fresh, planner_reports_lead, planner_accel_request, planner_brake_request)
+    return PlanState(
+      plan_fresh,
+      planner_reports_lead,
+      planner_accel_request,
+      planner_brake_request,
+      effective_source,
+      curve_active,
+    )
 
   def _update_lead(self, CS, frame, lead, plan):
     radar_fresh = frame - self.radar_frame <= P.RADAR_MAX_AGE_FRAMES
@@ -898,8 +955,9 @@ class LongitudinalController:
       self.handoff_ready_counter = 0
       return
 
-    # Known-good V3.3 behavior: trusted-lead decel uses a lowered normal 0x273
-    # target before/after hydraulic braking. No-lead negative targets stay off.
+    # Known-good V3.3 behavior: use a lowered normal 0x273 target for trusted
+    # lead decel. V4.3 also admits the two explicit no-lead contexts selected
+    # above: vision-turn anticipation and user-commanded lower cruise speed.
     if (
       propulsion.accel <= -P.DECEL_DEADBAND
       and frame > self.block_brake_until_frame
@@ -1036,8 +1094,18 @@ class LongitudinalController:
       not lead_state.status or propulsion.departing_lead or propulsion.distant_nonclosing_lead
     )
 
+    # Negative no-lead commands remain tightly scoped. Besides a trusted
+    # lead, allow only the selected vision-turn context or an explicit user
+    # cruise setpoint below current speed. Generic no-lead negative requests
+    # still cannot create a decel target.
+    set_speed_decel = (
+      plan.fresh
+      and plan.source == "cruise"
+      and CS.out.vEgo > CS.out.cruiseState.speed + P.CRUISE_DECEL_MARGIN
+    )
+
     if plan.fresh:
-      if plan.accel < 0.0 and lead_state.relevant:
+      if plan.accel < 0.0 and (lead_state.relevant or plan.curve_active or set_speed_decel):
         propulsion.accel = plan.accel
       elif plan.accel > 0.0 and apply_accel > 0.0:
         propulsion.accel = min(plan.accel + 0.08, 0.75 * plan.accel + 0.25 * apply_accel)

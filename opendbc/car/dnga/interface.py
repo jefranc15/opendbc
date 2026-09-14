@@ -43,9 +43,7 @@ class CarInterface(CarInterfaceBase):
     ret.minEnableSpeed = -1.0
     ret.stoppingDecelRate = 0.25
 
-    # Keep the proven longitudinal gains in the params now, but do not enable
-    # actuation until the V3.3R4 controller is ported. The temporary controller
-    # sends no CAN and dashcamOnly prevents accidental road-control use.
+    # Proven DNGA longitudinal gains retained from the DragonPilot port.
     ret.longitudinalTuning.kpBP = [0.0, 5.0, 20.0]
     ret.longitudinalTuning.kpV = [2.2, 2.0, 1.8]
     ret.longitudinalTuning.kiBP = [0.0]
