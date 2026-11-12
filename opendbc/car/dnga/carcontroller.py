@@ -8,8 +8,9 @@ from opendbc.car.dnga.dngacan import (
   dnga_create_brake_command,
   dnga_create_hud,
 )
-from opendbc.car.dnga.longitudinal import LongitudinalController
-from opendbc.car.dnga.values import CarControllerParams
+from opendbc.car.dnga.dnga_hybrid_feedback import hybrid_brake_feedback_state, hybrid_feedback_snapshot
+from opendbc.car.dnga.longitudinal import LongitudinalController, R2_MOVING_MIN_SPEED
+from opendbc.car.dnga.values import BrakeState, CarControllerParams
 from opendbc.car.interfaces import CarControllerBase
 
 
@@ -46,6 +47,58 @@ class CarController(CarControllerBase):
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.stockLdw = False
     self.longitudinal = LongitudinalController()
+
+  def _apply_brake_propulsion_interlock(self, command, CS, frame):
+    """Final physical-brake acceleration veto for the selected controller.
+
+    0x275 brake request plus 0x08C friction remain a hard physical-braking
+    acceleration veto. Raw torque request/actual channels have no authority.
+    """
+    feedback = hybrid_feedback_snapshot(CS, frame)
+    fresh, physical_braking = hybrid_brake_feedback_state(feedback)
+
+    if command.brake_state == BrakeState.HOLD:
+      # Preserve the inherited confirmed-standstill HOLD mode bits and target.
+      return command
+
+    hydraulic = command.brake_state in (BrakeState.BRAKING, BrakeState.CREEPING)
+    release_pump = command.pump < 0.0
+
+    # One controller object retains the historical low-speed SNG logic.
+    # Only its authorized moving-brake/release phase owns a below-vEgo
+    # 0x273 target. All SNG/CREEPING/low-speed commands keep the original
+    # neutral hydraulic target at current speed.
+    moving_brake_phase = (
+      CS.out.vEgo >= R2_MOVING_MIN_SPEED
+      and not CS.out.standstill
+      and not self.longitudinal.sng_armed
+      and not self.longitudinal.stop_hold
+      and self.longitudinal.sng_release_count == 0
+      and (self.longitudinal.r2_moving or frame < self.longitudinal.r2_release_until_frame)
+    )
+
+    if physical_braking:
+      # Brake-specific 0x275 / 0x08C feedback blocks renewed propulsion.
+      self.longitudinal.handoff_pending = True
+      self.longitudinal.handoff_ready_counter = 0
+      self.longitudinal.kinematic_ready_counter = 0
+
+    if hydraulic or release_pump:
+      command.is_accel = False
+      command.is_decel = True
+      if not moving_brake_phase:
+        # Preserve prior SNG and legacy hydraulic CAN behavior.
+        command.speed = float(CS.out.vEgo)
+        self.longitudinal.speed_offset = 0.0
+    elif not fresh or physical_braking or self.longitudinal.handoff_pending:
+      # After 0x271 releases, neutralize both 0x273 mode bits until the
+      # inherited HEV handoff and brake-feedback gates allow propulsion.
+      command.is_accel = False
+      command.is_decel = False
+      command.speed = float(CS.out.vEgo)
+      self.longitudinal.speed_offset = 0.0
+
+    return command
 
   def update(self, CC, CC_SP, CS, now_nanos):
     del CC_SP, now_nanos
@@ -89,7 +142,7 @@ class CarController(CarControllerBase):
       )
 
     # Keep the visible SET/RES session alive during a driver-gas override even
-    # when sunnypilot drops longActive. The V4.2 longitudinal controller still
+    # when sunnypilot drops longActive. The DNGA longitudinal controller still
     # blocks all OP longitudinal actuation while gas is pressed.
     longitudinal_enabled = (
       enabled
@@ -106,6 +159,7 @@ class CarController(CarControllerBase):
     )
 
     if command is not None:
+      command = self._apply_brake_propulsion_interlock(command, CS, self.frame)
       can_sends.append(
         dnga_create_accel_command(
           self.packer,

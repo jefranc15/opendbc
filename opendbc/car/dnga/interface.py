@@ -29,6 +29,8 @@ class CarInterface(CarInterfaceBase):
     ret.steerControlType = structs.CarParams.SteerControlType.torque
     ret.steerLimitTimer = 0.1
     ret.steerActuatorDelay = 0.30
+    # V6.0 base steering ratio; live learning may refine this estimate.
+    ret.steerRatio = 17.0
     ret.lateralParams.torqueBP = [0, 10, 20, 35]
     ret.lateralParams.torqueV = [255, 255, 255, 255]
     ret.lateralTuning.init("pid")
